@@ -9,11 +9,21 @@ import java.util.List;
 @Builder
 public class RouteSearchResponseDTO {
     private String routeId;
+    private String routeName;
     private String originCity;
     private String destinationCity;
     private Double totalDistance;
     private Double estimatedDuration;
     private List<String> intermediateStops;
+
+    // ✅ Bus Service Data via Feign Client
     private Integer availableTripsCount;
-    // Will be combined with Bus Service trips later
+    private List<TripDTO> availableTrips; // Uses TripDTO
+
+    // ✅ Additional combined data
+    private Double lowestFare;
+    private Double highestFare;
+    private String earliestDeparture;
+    private String latestDeparture;
+    private Integer totalAvailableSeats;
 }
