@@ -3,6 +3,7 @@ package com.routeservice.service.impl;
 import com.routeservice.dto.*;
 import com.routeservice.entity.Route;
 import com.routeservice.entity.RouteStop;
+import com.routeservice.feign.BusServiceFeignClient;
 import com.routeservice.repository.RouteRepository;
 import com.routeservice.repository.RouteStopRepository;
 import com.routeservice.service.RouteService;
@@ -10,12 +11,20 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 public class RouteServiceImpl implements RouteService {
+
+
+    @Autowired
+    private BusServiceFeignClient busServiceFeignClient; // ✅ Injected Feign Client
 
     @Autowired
     private RouteRepository routeRepository;
@@ -195,17 +204,125 @@ public class RouteServiceImpl implements RouteService {
     }
 
     @Override
-    public List<RouteSearchResponseDTO> searchAvailableRoutes(String originCity, String destinationCity) {
-        log.info("Searching available routes from {} to {}", originCity, destinationCity);
+    public List<RouteSearchResponseDTO> searchAvailableRoutes(String origin, String destination, LocalDate travelDate) {
+        log.info("🔍 Searching routes from {} to {} on date: {}", origin, destination, travelDate);
 
+        // 1. Get routes from Route database
         List<Route> routes = routeRepository.findByOriginCityAndDestinationCityAndIsActiveTrue(
-                originCity.toUpperCase(),
-                destinationCity.toUpperCase()
-        );
+                origin.toUpperCase(), destination.toUpperCase());
 
+        log.info("📍 Found {} routes in database", routes.size());
+
+        // 2. Get available trips from Bus Service via Feign Client
+        List<TripDTO> availableTrips = getAvailableTripsFromBusService(origin, destination, travelDate);
+
+        log.info("🚌 Found {} available trips from Bus Service", availableTrips.size());
+
+        // 3. Combine both datasets
         return routes.stream()
-                .map(this::convertToSearchResponseDTO)
+                .map(route -> createRouteSearchResponse(route, availableTrips))
                 .collect(Collectors.toList());
+    }
+
+    private List<TripDTO> getAvailableTripsFromBusService(String origin, String destination, LocalDate travelDate) {
+        try {
+            log.info("📞 Calling Bus Service via Feign: {} to {} on {}", origin, destination, travelDate);
+
+            // ✅ Convert LocalDate to String format that Bus Service expects
+            String departureDate = travelDate != null ?
+                    travelDate.atStartOfDay().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) :
+                    LocalDate.now().atStartOfDay().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+
+            // ✅ Call Feign client with all required parameters
+            List<TripDTO> trips = busServiceFeignClient.getAvailableTrips(origin, destination, departureDate);
+
+            log.info("✅ Successfully retrieved {} trips from Bus Service", trips != null ? trips.size() : 0);
+            return trips != null ? trips : List.of();
+
+        } catch (Exception e) {
+            log.error("❌ Error calling Bus Service: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    // ✅ Helper methods for TripDTO processing
+    private Double calculateLowestFare(List<TripDTO> trips) {
+        return trips.stream()
+                .map(TripDTO::getBaseFareAmount)
+                .min(BigDecimal::compareTo)
+                .orElse(BigDecimal.ZERO)
+                .doubleValue();
+    }
+
+    private Double calculateHighestFare(List<TripDTO> trips) {
+        return trips.stream()
+                .map(TripDTO::getBaseFareAmount)
+                .max(BigDecimal::compareTo)
+                .orElse(BigDecimal.ZERO)
+                .doubleValue();
+    }
+
+    private String findEarliestDeparture(List<TripDTO> trips) {
+        return trips.stream()
+                .map(TripDTO::getDepartureDateTime)
+                .min(LocalDateTime::compareTo)
+                .orElse(null)
+                .toString();
+    }
+
+    private String findLatestDeparture(List<TripDTO> trips) {
+        return trips.stream()
+                .map(TripDTO::getDepartureDateTime)
+                .max(LocalDateTime::compareTo)
+                .orElse(null)
+                .toString();
+    }
+
+    private Integer calculateTotalAvailableSeats(List<TripDTO> trips) {
+        return trips.stream()
+                .mapToInt(TripDTO::getAvailableSeats)
+                .sum();
+    }
+
+    private RouteSearchResponseDTO convertToSearchResponseDTO(Route route) {
+        List<String> intermediateStops = route.getStops() != null ?
+                route.getStops().stream()
+                        .filter(stop -> stop.getIsActive())
+                        .map(stop -> stop.getCityName())
+                        .collect(Collectors.toList()) :
+                List.of();
+
+        return RouteSearchResponseDTO.builder()
+                .routeId(route.getRouteId())
+                .routeName(route.getRouteName())
+                .originCity(route.getOriginCity())
+                .destinationCity(route.getDestinationCity())
+                .totalDistance(route.getTotalDistance() != null ? route.getTotalDistance().doubleValue() : 0.0)
+                .estimatedDuration(route.getEstimatedDuration() != null ? route.getEstimatedDuration().doubleValue() : 0.0)
+                .intermediateStops(intermediateStops)
+                .availableTripsCount(0) // Will be set later
+                .availableTrips(List.of()) // Will be set later
+                .build();
+    }
+
+    private RouteSearchResponseDTO createRouteSearchResponse(Route route, List<TripDTO> availableTrips) {
+        RouteSearchResponseDTO response = convertToSearchResponseDTO(route);
+
+        // ✅ Add TripDTO list to response
+        response.setAvailableTrips(availableTrips);
+        response.setAvailableTripsCount(availableTrips.size());
+
+        // ✅ Calculate additional summary information
+        if (!availableTrips.isEmpty()) {
+            response.setLowestFare(calculateLowestFare(availableTrips));
+            response.setHighestFare(calculateHighestFare(availableTrips));
+            response.setEarliestDeparture(findEarliestDeparture(availableTrips));
+            response.setLatestDeparture(findLatestDeparture(availableTrips));
+            response.setTotalAvailableSeats(calculateTotalAvailableSeats(availableTrips));
+        }
+
+        log.info("🔄 Combined route {} with {} trips", route.getRouteId(), availableTrips.size());
+        return response;
     }
 
     @Override
@@ -375,22 +492,4 @@ public class RouteServiceImpl implements RouteService {
                 .build();
     }
 
-    private RouteSearchResponseDTO convertToSearchResponseDTO(Route route) {
-        List<String> intermediateStops = route.getStops() != null ?
-                route.getStops().stream()
-                        .filter(RouteStop::getIsActive)
-                        .map(RouteStop::getCityName)
-                        .collect(Collectors.toList()) :
-                List.of();
-
-        return RouteSearchResponseDTO.builder()
-                .routeId(route.getRouteId())
-                .originCity(route.getOriginCity())
-                .destinationCity(route.getDestinationCity())
-                .totalDistance(route.getTotalDistance() != null ? route.getTotalDistance().doubleValue() : 0.0)
-                .estimatedDuration(route.getEstimatedDuration() != null ? route.getEstimatedDuration().doubleValue() : 0.0)
-                .intermediateStops(intermediateStops)
-                .availableTripsCount(0) // Will be populated when integrated with Bus Service
-                .build();
-    }
 }

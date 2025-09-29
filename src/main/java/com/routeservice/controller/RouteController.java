@@ -4,9 +4,11 @@ import com.routeservice.dto.*;
 import com.routeservice.service.RouteService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @RestController
@@ -96,12 +98,17 @@ public class RouteController {
     @GetMapping("/search/available")
     public ResponseEntity<List<RouteSearchResponseDTO>> searchAvailableRoutes(
             @RequestParam String origin,
-            @RequestParam String destination) {
-        log.info("GET /api/routes/search/available?origin={}&destination={} - Searching available routes", origin, destination);
-        List<RouteSearchResponseDTO> routes = routeService.searchAvailableRoutes(origin, destination);
-        return ResponseEntity.ok(routes);
-    }
+            @RequestParam String destination,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate travelDate) {
 
+        log.info("🔍 SEARCH: From {} to {} on {}", origin, destination, travelDate);
+
+        // Use today's date if not provided
+        LocalDate searchDate = travelDate != null ? travelDate : LocalDate.now();
+
+        List<RouteSearchResponseDTO> results = routeService.searchAvailableRoutes(origin, destination, searchDate);
+        return ResponseEntity.ok(results);
+    }
     // Route Stop Management APIs
 
     @PostMapping("/{routeId}/stops")
